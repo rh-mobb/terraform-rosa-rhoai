@@ -1,0 +1,258 @@
+---
+- name: Install OpenShift Operators (using kubernetes.core.k8s and ansible.builtin.shell)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    serverless_operator_crd: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        annotations:
+          openshift.io/display-name: "Red Hat OpenShift Serverless"
+        labels:
+          openshift.io/cluster-monitoring: 'true'
+        name: openshift-serverless
+      ---
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: serverless-operator
+        namespace: openshift-serverless
+      spec: {}
+      ---
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: serverless-operator
+        namespace: openshift-serverless
+      spec:
+        channel: stable
+        name: serverless-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+    servicemesh_operator_crd: |
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: servicemeshoperator
+        namespace: openshift-operators
+      spec:
+        channel: stable
+        installPlanApproval: Automatic
+        name: servicemeshoperator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+    authorino_operator_crd: |
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: authorino-operator
+        namespace: openshift-operators
+      spec:
+        channel: stable
+        installPlanApproval: Automatic
+        name: authorino-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+    rhods_namespace_crd: |
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        annotations:
+          openshift.io/display-name: "Red Hat OpenShift AI"
+        labels:
+          openshift.io/cluster-monitoring: 'true'
+        name: redhat-ods-operator
+    rhods_operatorgroup_crd: |
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: rhods-operator
+        namespace: redhat-ods-operator
+    rhods_subscription_crd: |
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: rhods-operator
+        namespace: redhat-ods-operator
+      spec:
+        name: rhods-operator
+        channel: stable
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+    datasciencecluster_crd: |
+      apiVersion: datasciencecluster.opendatahub.io/v1
+      kind: DataScienceCluster
+      metadata:
+        name: default-dsc
+      spec:
+        components:
+          codeflare:
+            managementState: Managed
+          kserve:
+            serving:
+              ingressGateway:
+                certificate:
+                  type: SelfSigned
+              managementState: Managed
+              name: knative-serving
+            managementState: Managed
+          ray:
+            managementState: Managed
+          kueue:
+            managementState: Managed
+          workbenches:
+            managementState: Managed
+          dashboard:
+            managementState: Managed
+          modelmeshserving:
+            managementState: Managed
+          datasciencepipelines:
+            managementState: Managed
+          trainingoperator:
+            managementState: Removed
+    acceleratorprofile_crd: |
+      apiVersion: dashboard.opendatahub.io/v1
+      kind: AcceleratorProfile
+      metadata:
+        name: migrated-gpu
+        namespace: redhat-ods-applications
+      spec:
+        displayName: NVIDIA GPU
+        enabled: true
+        identifier: nvidia.com/gpu
+        tolerations:
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Exists
+
+  tasks:
+    - name: Apply OpenShift Serverless resources (Namespace, OperatorGroup, Subscription)
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ serverless_operator_crd }}"
+
+    - name: Check if openshift-serverless namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: openshift-serverless
+      register: serverless_namespace_status
+
+    - name: Display namespace status or exit if not found
+      ansible.builtin.debug:
+        msg: "Namespace 'openshift-serverless' found."
+      when: serverless_namespace_status.resources | length > 0
+
+    - name: Exit if openshift-serverless namespace not found
+      ansible.builtin.fail:
+        msg: "Namespace 'openshift-serverless' not found. OpenShift Serverless Operator might not be installed."
+      when: serverless_namespace_status.resources | length == 0
+
+    - name: Apply Service Mesh Operator subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ servicemesh_operator_crd }}"
+      register: servicemesh_subscription_result
+      # Optional: Add debug to see what was applied
+    - name: Debug Service Mesh Subscription apply result
+      ansible.builtin.debug:
+        var: servicemesh_subscription_result
+
+    - name: Check Service Mesh Subscription status for 'AtLatestKnown'
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: servicemeshoperator
+        namespace: openshift-operators
+      register: servicemesh_sub_check
+      until:
+        # 1. Ensure resources list is not empty
+        - servicemesh_sub_check.resources | length > 0
+        # 2. Ensure the 'status' dictionary exists on the first resource
+        - servicemesh_sub_check.resources[0].status is defined
+        # 3. Ensure the 'state' field exists within the 'status' dictionary
+        - servicemesh_sub_check.resources[0].status.state is defined
+        # 4. Check the value of the 'state' field
+        - servicemesh_sub_check.resources[0].status.state == 'AtLatestKnown'
+        # 5. Ensure currentCSV is also defined (good for the next task)
+        - servicemesh_sub_check.resources[0].status.currentCSV is defined
+        - servicemesh_sub_check.resources[0].status.currentCSV | length > 0
+      retries: 30 # Try 30 times
+      delay: 10 # Wait 10 seconds between retries (total 300 seconds or 5 minutes)
+      loop_control:
+        label: "Waiting for Service Mesh Subscription to be 'AtLatestKnown' and currentCSV to be set"
+    - name: Get Service Mesh Operator CSV name from Subscription status
+      set_fact:
+        servicemesh_csv_name_from_sub: "{{ servicemesh_sub_check.resources[0].status.currentCSV }}"
+      when: servicemesh_sub_check.resources | length > 0
+
+    - name: Debug Service Mesh CSV name obtained from subscription
+      ansible.builtin.debug:
+        var: servicemesh_csv_name_from_sub
+      when: servicemesh_csv_name_from_sub is defined
+
+    - name: Wait for Service Mesh Operator CSV to succeed
+      ansible.builtin.shell: "oc wait --for=jsonpath='{.status.phase}=Succeeded' csv/{{ servicemesh_csv_name_from_sub }} -n openshift-operators --timeout=600s"
+      register: servicemesh_csv_wait_result
+
+    - name: Display Service Mesh CSV wait result
+      ansible.builtin.debug:
+        var: servicemesh_csv_wait_result
+
+    - name: Apply Authorino Operator subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ authorino_operator_crd }}"
+
+    - name: Get Authorino Operator CSV name
+      ansible.builtin.shell: "oc get csv -n openshift-operators | awk '/Red Hat - Authorino Operator/{print $1}'"
+      register: authorino_csv_name
+      changed_when: false
+      until: authorino_csv_name.stdout | trim | length > 0
+      retries: 30 # Try 30 times
+      delay: 10   # Wait 10 seconds between retries (total 30*10 = 300 seconds or 5 minutes)
+
+    - name: Wait for Authorino Operator CSV to succeed
+      ansible.builtin.shell: "oc wait --for=jsonpath='{.status.phase}=Succeeded' csv/{{ authorino_csv_name.stdout | trim }} -n openshift-operators --timeout=600s"
+
+    - name: Apply OpenShift AI Namespace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ rhods_namespace_crd }}"
+
+    - name: Apply OpenShift AI OperatorGroup
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ rhods_operatorgroup_crd }}"
+
+    - name: Apply OpenShift AI Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ rhods_subscription_crd }}"
+
+    - name: Get Red Hat OpenShift AI Operator CSV name
+      ansible.builtin.shell: "oc get csv -n openshift-operators | awk '/Red Hat OpenShift AI/{print $1}'"
+      register: rhoai_csv_name
+      changed_when: false
+      until: rhoai_csv_name.stdout | trim | length > 0
+      retries: 30 # Try 30 times
+      delay: 10   # Wait 10 seconds between retries (total 30*10 = 300 seconds or 5 minutes)
+
+    - name: Wait for Red Hat OpenShift AI Operator CSV to succeed
+      ansible.builtin.shell: "oc wait --for=jsonpath='{.status.phase}=Succeeded' csv/{{ rhoai_csv_name.stdout | trim }} -n openshift-operators --timeout=600s"
+
+    - name: Apply DataScienceCluster
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ datasciencecluster_crd }}"
+
+    - name: Wait for DataScienceCluster to be Ready
+      ansible.builtin.shell: "oc wait --for=jsonpath='{.status.phase}'=Ready datasciencecluster default-dsc --timeout=15m"
+      # No CSV parsing needed here, just the direct object wait
+
+    - name: Apply AcceleratorProfile
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ acceleratorprofile_crd }}"

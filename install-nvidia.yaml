@@ -1,0 +1,203 @@
+---
+- name: Deploy NFD and GPU Operators on OpenShift
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # Ensure these variables are defined in your Ansible inventory or passed via --extra-vars
+    cluster_api_url: "{{ cluster_api_url }}"
+    admin_password: "{{ admin_password }}"
+
+  tasks:
+    - name: Log in to OpenShift cluster
+      ansible.builtin.shell: >
+        oc login {{ cluster_api_url }} -u admin -p {{ admin_password }}
+      changed_when: false # Login command doesn't change state, so we mark it as not changed
+
+    - name: Ensure openshift-nfd namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: openshift-nfd
+        state: present
+
+    - name: Apply NFD OperatorGroup and Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            generateName: openshift-nfd-
+            name: openshift-nfd
+            namespace: openshift-nfd
+          spec:
+            targetNamespaces:
+            - openshift-nfd
+          ---
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: nfd
+            namespace: openshift-nfd
+          spec:
+            channel: "stable"
+            installPlanApproval: Automatic
+            name: nfd
+            source: redhat-operators
+            sourceNamespace: openshift-marketplace
+      register: nfd_operator_deployment
+      until: nfd_operator_deployment.changed or nfd_operator_deployment.failed == false
+      retries: 10
+      delay: 5
+
+    - name: Wait for NFD Operator deployment to be available
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: nfd-controller-manager
+        namespace: openshift-nfd
+      register: nfd_deployment_status
+      until:
+        - nfd_deployment_status.resources | length > 0
+        - nfd_deployment_status.resources[0].status.availableReplicas is defined
+        - nfd_deployment_status.resources[0].status.availableReplicas > 0
+      retries: 60 # 60 * 5 seconds = 300 seconds timeout
+      delay: 5
+      failed_when: nfd_deployment_status.failed
+
+    - name: Apply NodeFeatureDiscovery configuration
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          kind: NodeFeatureDiscovery
+          apiVersion: nfd.openshift.io/v1
+          metadata:
+            name: nfd-instance
+            namespace: openshift-nfd
+          spec:
+            operand:
+              servicePort: 12000
+      register: nfd_instance_creation
+      until: nfd_instance_creation.changed or nfd_instance_creation.failed == false
+      retries: 10
+      delay: 5
+
+    - name: Wait for NFD instance to be created
+      kubernetes.core.k8s_info:
+        api_version: nfd.openshift.io/v1
+        kind: NodeFeatureDiscovery
+        name: nfd-instance
+        namespace: openshift-nfd
+      register: nfd_instance_status
+      until: nfd_instance_status.resources | length > 0
+      retries: 60 # 60 * 5 seconds = 300 seconds timeout
+      delay: 5
+      failed_when: nfd_instance_status.failed
+
+    - name: Get latest GPU Operator channel
+      ansible.builtin.shell: >
+        oc get packagemanifest gpu-operator-certified -n openshift-marketplace -o jsonpath='{.status.defaultChannel}'
+      register: gpu_channel_output
+      changed_when: false
+
+    - name: Set GPU Operator channel fact
+      ansible.builtin.set_fact:
+        gpu_operator_channel: "{{ gpu_channel_output.stdout }}"
+
+    - name: Get latest GPU Operator ClusterServiceVersion (CSV)
+      ansible.builtin.shell: >
+        oc get packagemanifests/gpu-operator-certified -n openshift-marketplace -o json | jq -r --arg CHANNEL "{{ gpu_operator_channel }}" '.status.channels[] | select(.name == $CHANNEL) | .currentCSV'
+      register: gpu_csv_output
+      changed_when: false
+
+    - name: Set GPU Operator CSV fact
+      ansible.builtin.set_fact:
+        gpu_operator_csv: "{{ gpu_csv_output.stdout }}"
+
+    - name: Ensure nvidia-gpu-operator namespace exists
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: nvidia-gpu-operator
+        state: present
+
+    - name: Apply GPU OperatorGroup and Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: nvidia-gpu-operator-group
+            namespace: nvidia-gpu-operator
+          spec:
+           targetNamespaces:
+           - nvidia-gpu-operator
+          ---
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: gpu-operator-certified
+            namespace: nvidia-gpu-operator
+          spec:
+            channel: "{{ gpu_operator_channel }}"
+            installPlanApproval: Automatic
+            name: gpu-operator-certified
+            source: certified-operators
+            sourceNamespace: openshift-marketplace
+      register: gpu_operator_subscription
+      until: gpu_operator_subscription.changed or gpu_operator_subscription.failed == false
+      retries: 10
+      delay: 5
+
+    - name: Wait for GPU Operator ClusterServiceVersion (CSV) to be available
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ gpu_operator_csv }}"
+        namespace: nvidia-gpu-operator
+      register: gpu_csv_status
+      until: gpu_csv_status.resources | length > 0
+      retries: 60 # 60 * 5 seconds = 300 seconds timeout
+      delay: 5
+      failed_when: gpu_csv_status.failed
+
+    - name: Fetch and apply ClusterPolicy from CSV annotations
+      ansible.builtin.shell: >
+        oc get csv -n nvidia-gpu-operator {{ gpu_operator_csv }} -ojsonpath='{.metadata.annotations.alm-examples}' | jq '.[0]' | oc apply -f -
+      changed_when: false # This command applies, but we'll manage idempotency with the next task
+
+    - name: Apply ClusterPolicy for the GPU operator
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: nvidia.com/v1
+          kind: ClusterPolicy
+          metadata:
+            name: gpu-cluster-policy
+          spec:
+            operator:
+              defaultRuntime: crio
+            daemonsets:
+              enabled: true
+            dcgm:
+              enabled: true
+            dcgmExporter:
+              enabled: true
+            devicePlugin:
+              enabled: true
+            driver:
+              enabled: true
+            gfd:
+              enabled: true
+            migManager:
+              enabled: true
+            nodeStatusExporter:
+              enabled: true
+            toolkit:
+              enabled: true
+      register: gpu_cluster_policy_apply
+      until: gpu_cluster_policy_apply.changed or gpu_cluster_policy_apply.failed == false
+      retries: 10
+      delay: 5
