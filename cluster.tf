@@ -228,10 +228,11 @@ resource "null_resource" "deploy_openshift_nvidia_operators" {
     # Working directory where the Ansible playbook resides
     working_dir = path.module
 
-    <<-EOT
-      command = "sleep 30"
-      command = "ansible-playbook install-nvidia.yaml --extra-vars 'cluster_api_url=${local.cluster_api_url}' --extra-vars 'admin_password=${var.admin_password}'"
+    command = <<-EOT
+      sleep 30
+      ansible-playbook install-nvidia.yaml --extra-vars 'cluster_api_url=${local.cluster_api_url}' --extra-vars 'admin_password=${var.admin_password}'
     EOT
+    
     # Wait 30 seconds for the admin htpassword user to be ready
     # Command to run the Ansible playbook
     
