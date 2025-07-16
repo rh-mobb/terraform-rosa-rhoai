@@ -224,15 +224,17 @@ resource "null_resource" "deploy_openshift_nvidia_operators" {
   depends_on = [rhcs_identity_provider.admin]
 
   provisioner "local-exec" {
-    command = "sleep 30"
-    # Wait 30 seconds for the admin htpassword user to be ready
-
+  
     # Working directory where the Ansible playbook resides
     working_dir = path.module
 
+    <<-EOT
+      command = "sleep 30"
+      command = "ansible-playbook install-nvidia.yaml --extra-vars 'cluster_api_url=${local.cluster_api_url}' --extra-vars 'admin_password=${var.admin_password}'"
+    EOT
+    # Wait 30 seconds for the admin htpassword user to be ready
     # Command to run the Ansible playbook
-    command = "ansible-playbook install-nvidia.yaml --extra-vars 'cluster_api_url=${local.cluster_api_url}' --extra-vars 'admin_password=${var.admin_password}'"
-  
+    
   }
 }
 
