@@ -193,12 +193,11 @@ resource "rhcs_hcp_machine_pool" "default" {
 }
 
 resource "rhcs_hcp_machine_pool" "gpu" {
-  count = var.hosted_control_plane ? length(data.rhcs_hcp_machine_pool.default) : 0
 
   name        = "gpu-pool"
   cluster     = rhcs_cluster_rosa_hcp.rosa[0].id
-  subnet_id   = data.rhcs_hcp_machine_pool.default[count.index].subnet_id
-  auto_repair = data.rhcs_hcp_machine_pool.default[count.index].auto_repair
+  subnet_id   = data.rhcs_hcp_machine_pool.default[0].subnet_id
+  auto_repair = data.rhcs_hcp_machine_pool.default[0].auto_repair
 
   # NOTE: if autoscaling is specified via the max_replicas variable, set replicas to null as the API will reject 
   #       setting both replicas and autoscaling.*_replicas
@@ -232,7 +231,7 @@ resource "null_resource" "deploy_openshift_nvidia_operators" {
       sleep 30
       ansible-playbook install-nvidia.yaml --extra-vars 'cluster_api_url=${local.cluster_api_url}' --extra-vars 'admin_password=${var.admin_password}'
     EOT
-    
+
     # Wait 30 seconds for the admin htpassword user to be ready
     # Command to run the Ansible playbook
     
