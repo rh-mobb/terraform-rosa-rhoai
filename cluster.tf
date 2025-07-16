@@ -149,13 +149,6 @@ resource "rhcs_cluster_rosa_hcp" "rosa" {
 
 # see https://registry.terraform.io/providers/terraform-redhat/rhcs/latest/docs/guides/worker-machine-pool for background
 
-data "rhcs_hcp_machine_pool" "gpu" {
-  count = var.hosted_control_plane ? length(local.hcp_machine_pools) : 0
-
-  cluster = rhcs_cluster_rosa_hcp.rosa[0].id
-  name    = local.hcp_machine_pools[count.index]
-}
-
 data "rhcs_hcp_machine_pool" "default" {
   count = var.hosted_control_plane ? length(local.hcp_machine_pools) : 0
 
@@ -163,30 +156,6 @@ data "rhcs_hcp_machine_pool" "default" {
   name    = local.hcp_machine_pools[count.index]
 }
 
-resource "rhcs_hcp_machine_pool" "gpu" {
-  count = var.hosted_control_plane ? length(data.rhcs_hcp_machine_pool.default) : 0
-
-  name        = "gpu-pool"
-  cluster     = rhcs_cluster_rosa_hcp.rosa[0].id
-  subnet_id   = data.rhcs_hcp_machine_pool.default[count.index].subnet_id
-  auto_repair = data.rhcs_hcp_machine_pool.default[count.index].auto_repair
-
-  # NOTE: if autoscaling is specified via the max_replicas variable, set replicas to null as the API will reject 
-  #       setting both replicas and autoscaling.*_replicas
-  replicas = 2
-  autoscaling = {
-    enabled      = local.autoscaling
-    min_replicas = local.autoscaling ? local.hcp_replicas : null
-    max_replicas = local.autoscaling ? var.max_replicas : null
-  }
-
-  aws_node_pool = {
-    instance_type            = var.gpu_machine_type
-    tags                     = var.tags
-  }
-  depends_on = [rhcs_hcp_machine_pool.default]
-
-}
 resource "rhcs_hcp_machine_pool" "default" {
   count = var.hosted_control_plane ? length(data.rhcs_hcp_machine_pool.default) : 0
 
@@ -223,12 +192,41 @@ resource "rhcs_hcp_machine_pool" "default" {
   }
 }
 
+resource "rhcs_hcp_machine_pool" "gpu" {
+  count = var.hosted_control_plane ? length(data.rhcs_hcp_machine_pool.default) : 0
+
+  name        = "gpu-pool"
+  cluster     = rhcs_cluster_rosa_hcp.rosa[0].id
+  subnet_id   = data.rhcs_hcp_machine_pool.default[count.index].subnet_id
+  auto_repair = data.rhcs_hcp_machine_pool.default[count.index].auto_repair
+
+  # NOTE: if autoscaling is specified via the max_replicas variable, set replicas to null as the API will reject 
+  #       setting both replicas and autoscaling.*_replicas
+  replicas = 2
+  autoscaling = {
+    enabled      = local.autoscaling
+    min_replicas = local.autoscaling ? local.hcp_replicas : null
+    max_replicas = local.autoscaling ? var.max_replicas : null
+  }
+
+  aws_node_pool = {
+    instance_type            = var.gpu_machine_type
+    tags                     = var.tags
+  }
+  depends_on = [rhcs_hcp_machine_pool.default]
+
+}
+
+
 resource "null_resource" "deploy_openshift_nvidia_operators" {
   # This triggers the provisioner when outputs it depends on change.
   # Explicitly using depends_on for clarity, but implicit dependencies often work.
-  depends_on = [rhcs_cluster_rosa_hcp.rosa,rhcs_identity_provider.admin]
+  depends_on = [rhcs_identity_provider.admin]
 
   provisioner "local-exec" {
+    command = "sleep 30"
+    # Wait 30 seconds for the admin htpassword user to be ready
+
     # Working directory where the Ansible playbook resides
     working_dir = path.module
 
